@@ -335,22 +335,19 @@ const WRITE_THROTTLE_MS  = 80;     // max scritture Firebase al sec
 const PLAYER_TIMEOUT_MS  = 2500;   // spotlight scompare dopo N ms di silenzio
 const INACTIVITY_RESET_S = 10;     // sec stanza vuota → resetta sync da capo
 
-const VOL_MAX     = 85;   // volume massimo player
-const FADE_IN_MS  = 550;  // ms dissolvenza entrata audio
-const FADE_OUT_MS = 750;  // ms dissolvenza uscita audio
+const VOL_MAX = 85;   // volume massimo player
 
 // ── STATO ────────────────────────────────────────────────────
-let db            = null;
-let roomId        = null;
-let playerId      = null;
-let isScreen      = false;
-let players       = {};
-let pointerDown   = false;
-let lastWrite     = 0;
-let audioUnlocked = false;  // true dopo il primo gesto utente
-let volNow        = 0;
-let fadeRAF       = null;   // requestAnimationFrame handle per il fade
-let resetTimer    = null;   // timer inactivity reset (screen mode only)
+let db             = null;
+let roomId         = null;
+let playerId       = null;
+let isScreen       = false;
+let players        = {};
+let pointerDown    = false;
+let lastWrite      = 0;
+let audioUnlocked  = false;  // true dopo il primo gesto utente
+let serverTimeOffset = 0;    // offset ms tra clock locale e server Firebase
+let resetTimer     = null;   // timer inactivity reset (screen mode only)
 
 const canvas = document.getElementById('cvs');
 const ctx    = canvas.getContext('2d');
@@ -367,7 +364,7 @@ function onYTReady(fn) {
 
 window.onYouTubeIframeAPIReady = function () {
   ytPlayer = new YT.Player('yt-player', {
-    videoId: 'a-4kuzLgOGo',
+    videoId: 'ljapRibLu9A',
     playerVars: {
       autoplay:       1,   // parte subito muto (rispetta policy browser)
       controls:       0,
@@ -375,7 +372,7 @@ window.onYouTubeIframeAPIReady = function () {
       fs:             0,
       iv_load_policy: 3,
       loop:           1,
-      playlist:       'a-4kuzLgOGo', // necessario per loop YT
+      playlist:       'ljapRibLu9A', // necessario per loop YT
       modestbranding: 1,
       playsinline:    1,
       rel:            0,
@@ -392,50 +389,30 @@ window.onYouTubeIframeAPIReady = function () {
   });
 };
 
-// ── AUDIO FADE ───────────────────────────────────────────────
-// Il video gira sempre. L'audio sale/scende col dito (effetto surround).
-// audioUnlocked diventa true al primo gesto — richiesto dalle policy mobile.
-// Usa requestAnimationFrame + easing cubico per una dissolvenza fluida.
-
-function audioFadeTo(targetVol, durationMs) {
-  if (fadeRAF !== null) cancelAnimationFrame(fadeRAF);
-  const startVol  = volNow;
-  const startTime = performance.now();
-
-  function step(ts) {
-    const t = Math.min(1, (ts - startTime) / durationMs);
-    // ease-out cubico: parte veloce, rallenta in coda
-    const eased = 1 - Math.pow(1 - t, 3);
-    volNow = Math.round(startVol + (targetVol - startVol) * eased);
-    if (ytReady) ytPlayer.setVolume(volNow);
-
-    if (t < 1) {
-      fadeRAF = requestAnimationFrame(step);
-    } else {
-      volNow  = targetVol;
-      if (ytReady) ytPlayer.setVolume(targetVol);
-      fadeRAF = null;
-    }
-  }
-
-  fadeRAF = requestAnimationFrame(step);
-}
-
-function audioFadeIn() {
-  if (!audioUnlocked || isScreen || !ytReady) return;
-  audioFadeTo(VOL_MAX, FADE_IN_MS);
-}
-
-function audioFadeOut() {
-  if (!audioUnlocked || isScreen || !ytReady) return;
-  audioFadeTo(0, FADE_OUT_MS);
-}
+// ── AUDIO ON/OFF ─────────────────────────────────────────────
+// Il video gira sempre muto. Il volume si attiva/disattiva istantaneamente
+// col tocco (effetto surround). audioUnlocked = true al primo gesto.
 
 function unlockAudio() {
-  if (audioUnlocked || !ytReady) return;
-  ytPlayer.setVolume(0); // prima azzera il volume, poi togli il mute
-  ytPlayer.unMute();     // così non c'è "pop" al primo tocco
+  if (audioUnlocked) return;
   audioUnlocked = true;
+  // Se il player è già pronto, sblocca subito; altrimenti aspetta
+  const doUnlock = () => {
+    ytPlayer.setVolume(0);
+    ytPlayer.unMute();
+  };
+  if (ytReady) doUnlock();
+  else onYTReady(doUnlock);
+}
+
+function audioOn() {
+  if (!audioUnlocked || isScreen) return;
+  if (ytReady) ytPlayer.setVolume(VOL_MAX);
+}
+
+function audioOff() {
+  if (!audioUnlocked || isScreen) return;
+  if (ytReady) ytPlayer.setVolume(0);
 }
 
 // ── UTILITÀ ──────────────────────────────────────────────────
@@ -476,6 +453,11 @@ function initFirebase() {
   try {
     firebase.initializeApp(window.FIREBASE_CONFIG);
     db = firebase.database();
+    // Legge l'offset tra clock locale e server Firebase
+    // Così tutti i device calcolano l'elapsed sullo stesso orologio
+    db.ref('.info/serverTimeOffset').on('value', snap => {
+      serverTimeOffset = snap.val() || 0;
+    });
     return true;
   } catch(e) {
     console.error('Firebase init:', e);
@@ -624,23 +606,27 @@ function fadeTap() {
 }
 
 // ── SYNC VIDEO ───────────────────────────────────────────────
-// Usa videoStart (timestamp Firebase) come clock condiviso.
-// Se è 0 (stanza appena creata o reset per inattività) → lo imposta a Date.now().
-// Tutti i device calcolano elapsed e fanno seekTo allo stesso secondo.
+// Usa videoStart come clock condiviso scritto con ServerValue.TIMESTAMP
+// (orologio del server Firebase, uguale per tutti i device).
+// serverTimeOffset corregge il clock locale → elapsed preciso su ogni device.
 async function syncVideo() {
   const ref  = db.ref(`rooms/${roomId}/videoStart`);
   const snap = await ref.once('value');
   let   startTs = snap.val();
 
   if (!startTs || startTs === 0) {
-    startTs = Date.now();
-    await ref.set(startTs);
+    // Primo player: scrive timestamp del server e rilegge il valore reale
+    await ref.set(firebase.database.ServerValue.TIMESTAMP);
+    const snap2 = await ref.once('value');
+    startTs = snap2.val();
   }
 
   await new Promise(resolve => onYTReady(resolve));
   const duration = ytPlayer.getDuration();
   if (duration > 0) {
-    const elapsed = (Date.now() - startTs) / 1000;
+    // serverNow = ora corretta con l'orologio del server
+    const serverNow = Date.now() + serverTimeOffset;
+    const elapsed   = (serverNow - startTs) / 1000;
     ytPlayer.seekTo(elapsed % duration, true);
   }
 }
@@ -649,8 +635,8 @@ async function syncVideo() {
 function onTS(e) {
   e.preventDefault();
   pointerDown = true;
-  unlockAudio();   // no-op se già sbloccato
-  audioFadeIn();
+  unlockAudio();
+  audioOn();
   writePos(e.touches[0].clientX, e.touches[0].clientY);
 }
 function onTM(e) {
@@ -660,7 +646,7 @@ function onTM(e) {
 function onTE(e) {
   e.preventDefault();
   pointerDown = false;
-  audioFadeOut();
+  audioOff();
   deactivate();
 }
 
@@ -668,11 +654,11 @@ function onTE(e) {
 function onMD(e) {
   pointerDown = true;
   unlockAudio();
-  audioFadeIn();
+  audioOn();
   writePos(e.clientX, e.clientY);
 }
 function onMV(e) { if (pointerDown) writePos(e.clientX, e.clientY); }
-function onMU()  { pointerDown = false; audioFadeOut(); deactivate(); }
+function onMU()  { pointerDown = false; audioOff(); deactivate(); }
 
 // ── SCRITTURA FIREBASE ───────────────────────────────────────
 function writePos(cx, cy) {
@@ -714,23 +700,25 @@ function renderFrame() {
 
   ctx.globalCompositeOperation = 'destination-out';
 
-  for (const [, p] of Object.entries(players)) {
+  for (const [pid, p] of Object.entries(players)) {
     if (!p || p.active === false) continue;
     if (p.t && (now - p.t) > PLAYER_TIMEOUT_MS) continue;
 
     const px = p.x * w;
     const py = p.y * h;
 
+    // Il proprio spotlight in player mode è il 50% più grande (solo visuale locale)
+    const spotR = (!isScreen && pid === playerId) ? r * 1.5 : r;
+
     // Gradiente: 100% trasparente fino a SOFTNESS_STOP, poi sfuma
-    // Con SOFTNESS_STOP basso (0.35) il cerchio è netto e brillante
-    const g = ctx.createRadialGradient(px, py, 0, px, py, r);
+    const g = ctx.createRadialGradient(px, py, 0, px, py, spotR);
     g.addColorStop(0,             'rgba(0,0,0,1)');
     g.addColorStop(SOFTNESS_STOP, 'rgba(0,0,0,0.97)');
     g.addColorStop(1,             'rgba(0,0,0,0)');
 
     ctx.fillStyle = g;
     ctx.beginPath();
-    ctx.arc(px, py, r, 0, Math.PI * 2);
+    ctx.arc(px, py, spotR, 0, Math.PI * 2);
     ctx.fill();
   }
 
