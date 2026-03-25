@@ -336,28 +336,24 @@ const PLAYER_TIMEOUT_MS  = 2500;   // spotlight scompare dopo N ms di silenzio
 const INACTIVITY_RESET_S = 10;     // sec stanza vuota → resetta sync da capo
 
 const VOL_MAX     = 85;   // volume massimo player
-const FADE_IN_MS  = 280;  // dissolvenza entrata audio
-const FADE_OUT_MS = 360;  // dissolvenza uscita audio
+const FADE_IN_MS  = 550;  // ms dissolvenza entrata audio
+const FADE_OUT_MS = 750;  // ms dissolvenza uscita audio
 
 // ── STATO ────────────────────────────────────────────────────
-let db           = null;
-let roomId       = null;
-let playerId     = null;
-let isScreen     = false;
-let players      = {};
-let pointerDown  = false;
-let lastWrite    = 0;
+let db            = null;
+let roomId        = null;
+let playerId      = null;
+let isScreen      = false;
+let players       = {};
+let pointerDown   = false;
+let lastWrite     = 0;
 let audioUnlocked = false;  // true dopo il primo gesto utente
-let volNow       = 0;
-let fadeInterval = null;
-let resetTimer   = null;    // timer inactivity reset (screen mode only)
+let volNow        = 0;
+let fadeRAF       = null;   // requestAnimationFrame handle per il fade
+let resetTimer    = null;   // timer inactivity reset (screen mode only)
 
 const canvas = document.getElementById('cvs');
 const ctx    = canvas.getContext('2d');
-
-// Passi di fade calcolati su intervallo 20ms
-const FADE_IN_STEP  = Math.max(1, Math.ceil(VOL_MAX / (FADE_IN_MS  / 20)));
-const FADE_OUT_STEP = Math.max(1, Math.ceil(VOL_MAX / (FADE_OUT_MS / 20)));
 
 // ── YOUTUBE PLAYER ───────────────────────────────────────────
 let ytPlayer       = null;
@@ -399,31 +395,46 @@ window.onYouTubeIframeAPIReady = function () {
 // ── AUDIO FADE ───────────────────────────────────────────────
 // Il video gira sempre. L'audio sale/scende col dito (effetto surround).
 // audioUnlocked diventa true al primo gesto — richiesto dalle policy mobile.
+// Usa requestAnimationFrame + easing cubico per una dissolvenza fluida.
+
+function audioFadeTo(targetVol, durationMs) {
+  if (fadeRAF !== null) cancelAnimationFrame(fadeRAF);
+  const startVol  = volNow;
+  const startTime = performance.now();
+
+  function step(ts) {
+    const t = Math.min(1, (ts - startTime) / durationMs);
+    // ease-out cubico: parte veloce, rallenta in coda
+    const eased = 1 - Math.pow(1 - t, 3);
+    volNow = Math.round(startVol + (targetVol - startVol) * eased);
+    if (ytReady) ytPlayer.setVolume(volNow);
+
+    if (t < 1) {
+      fadeRAF = requestAnimationFrame(step);
+    } else {
+      volNow  = targetVol;
+      if (ytReady) ytPlayer.setVolume(targetVol);
+      fadeRAF = null;
+    }
+  }
+
+  fadeRAF = requestAnimationFrame(step);
+}
 
 function audioFadeIn() {
   if (!audioUnlocked || isScreen || !ytReady) return;
-  clearInterval(fadeInterval);
-  fadeInterval = setInterval(() => {
-    volNow = Math.min(VOL_MAX, volNow + FADE_IN_STEP);
-    ytPlayer.setVolume(volNow);
-    if (volNow >= VOL_MAX) clearInterval(fadeInterval);
-  }, 20);
+  audioFadeTo(VOL_MAX, FADE_IN_MS);
 }
 
 function audioFadeOut() {
   if (!audioUnlocked || isScreen || !ytReady) return;
-  clearInterval(fadeInterval);
-  fadeInterval = setInterval(() => {
-    volNow = Math.max(0, volNow - FADE_OUT_STEP);
-    ytPlayer.setVolume(volNow);
-    if (volNow <= 0) clearInterval(fadeInterval);
-  }, 20);
+  audioFadeTo(0, FADE_OUT_MS);
 }
 
 function unlockAudio() {
   if (audioUnlocked || !ytReady) return;
-  ytPlayer.unMute();
-  ytPlayer.setVolume(0);  // parte da 0, poi il fade porta al max
+  ytPlayer.setVolume(0); // prima azzera il volume, poi togli il mute
+  ytPlayer.unMute();     // così non c'è "pop" al primo tocco
   audioUnlocked = true;
 }
 
