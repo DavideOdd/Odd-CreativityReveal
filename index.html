@@ -1,0 +1,746 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>ODD — Illumina</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+    :root {
+      --dark:  #080810;
+      --gold:  #D4A843;
+      --gray:  #6B7280;
+      --light: #F3F4F6;
+    }
+
+    html, body {
+      width: 100%; height: 100%;
+      background: var(--dark);
+      color: var(--light);
+      font-family: Arial, sans-serif;
+      overflow: hidden;
+    }
+
+    /* ── JOIN ──────────────────────────────────────────────── */
+    #join {
+      position: fixed; inset: 0; z-index: 20;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 28px; padding: 32px;
+    }
+
+    #join .brand {
+      font-size: 11px; font-weight: bold;
+      letter-spacing: .35em; color: var(--gold);
+      text-transform: uppercase;
+    }
+
+    #join h1 {
+      font-size: clamp(30px, 9vw, 56px);
+      font-weight: bold; text-align: center;
+      line-height: 1.05; color: var(--light);
+    }
+
+    #join p {
+      font-size: 14px; color: var(--gray);
+      text-align: center; max-width: 300px;
+      line-height: 1.65;
+    }
+
+    .room-box {
+      display: flex; flex-direction: column;
+      align-items: center; gap: 14px;
+      width: 100%; max-width: 300px;
+    }
+
+    .btn-gold {
+      width: 100%; padding: 16px;
+      background: var(--gold); color: #111;
+      border: none; border-radius: 4px;
+      font-size: 14px; font-weight: bold;
+      letter-spacing: .12em; text-transform: uppercase;
+      cursor: pointer;
+    }
+    .btn-gold:active { opacity: .85; }
+
+    .sep {
+      font-size: 11px; color: var(--gray);
+      letter-spacing: .2em;
+    }
+
+    .join-row {
+      display: flex; gap: 8px; width: 100%;
+    }
+
+    #code-input {
+      flex: 1; padding: 14px 12px;
+      background: rgba(255,255,255,.07);
+      border: 1px solid rgba(255,255,255,.18);
+      border-radius: 4px; color: var(--light);
+      font-size: 22px; font-weight: bold;
+      letter-spacing: .35em; text-align: center;
+      text-transform: uppercase; outline: none;
+    }
+    #code-input::placeholder { color: rgba(255,255,255,.2); letter-spacing: .1em; }
+    #code-input:focus { border-color: var(--gold); }
+
+    .btn-outline {
+      padding: 14px 18px;
+      background: transparent;
+      border: 1px solid var(--gold);
+      border-radius: 4px; color: var(--gold);
+      font-size: 13px; font-weight: bold;
+      letter-spacing: .1em; text-transform: uppercase;
+      cursor: pointer; white-space: nowrap;
+    }
+    .btn-outline:active { background: rgba(212,168,67,.15); }
+
+    #err { font-size: 12px; color: #F87171; min-height: 18px; text-align: center; }
+
+    /* ── GIOCO ─────────────────────────────────────────────── */
+    #game {
+      display: none;
+      position: fixed; inset: 0; z-index: 10;
+    }
+
+    /* YouTube player container — nascosto sotto il canvas nero */
+    #yt-player {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%;
+      z-index: 0; overflow: hidden;
+      pointer-events: none;
+      background: #000;
+    }
+    /* L'iframe generato dall'API YT — cover esatto come object-fit:cover */
+    #yt-player iframe {
+      position: absolute;
+      top: 50%; left: 50%;
+      /* 16:9: larghezza minima 100vw, altezza minima 100vh */
+      width:  max(100%, calc(100vh * 16 / 9));
+      height: max(100%, calc(100vw * 9 / 16));
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+    }
+
+    /* Canvas sopra al video — nero con fori spotlight */
+    #cvs {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%;
+      z-index: 1; touch-action: none;
+      cursor: none;
+    }
+
+    /* HUD in alto */
+    #hud {
+      position: absolute; top: 0; left: 0; right: 0;
+      z-index: 3; display: flex;
+      justify-content: space-between; align-items: flex-start;
+      padding: 14px 18px; pointer-events: none;
+    }
+    #hud-brand {
+      font-size: 11px; font-weight: bold;
+      letter-spacing: .25em; color: var(--gold); opacity: .65;
+    }
+    #hud-info {
+      font-size: 11px; color: rgba(255,255,255,.35);
+      letter-spacing: .1em; text-align: right;
+    }
+    #hud-count { color: rgba(255,255,255,.55); font-weight: bold; }
+
+    /* Istruzione fading */
+    #hint {
+      position: absolute; bottom: 28px; left: 50%;
+      transform: translateX(-50%);
+      z-index: 3; font-size: 11px;
+      color: rgba(255,255,255,.28); letter-spacing: .18em;
+      text-transform: uppercase; pointer-events: none;
+      white-space: nowrap; transition: opacity 1.5s;
+    }
+
+    /* Overlay tap-to-start */
+    #tap {
+      position: absolute; inset: 0; z-index: 5;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 14px; background: rgba(0,0,0,.88);
+      cursor: pointer; transition: opacity .7s;
+    }
+    #tap .icon { font-size: 52px; animation: pulse 2.2s ease-in-out infinite; }
+    #tap .t1 { font-size: clamp(17px,5vw,22px); font-weight: bold; }
+    #tap .t2 { font-size: 13px; color: var(--gray); max-width: 260px; text-align: center; line-height: 1.6; }
+
+    @keyframes pulse {
+      0%,100% { opacity: .35; transform: scale(1); }
+      50%      { opacity: 1;   transform: scale(1.12); }
+    }
+
+    /* Screen mode — riquadro QR */
+    #screen-box {
+      display: none;
+      position: absolute; bottom: 20px; right: 20px;
+      z-index: 4; background: rgba(0,0,0,.72);
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 8px; padding: 14px;
+      text-align: center;
+    }
+    #screen-box .qlabel {
+      font-size: 9px; letter-spacing: .22em;
+      color: var(--gray); margin-bottom: 8px;
+    }
+    #screen-box .qcode {
+      font-size: 20px; font-weight: bold;
+      letter-spacing: .4em; color: var(--gold);
+      margin-top: 8px;
+    }
+
+    /* Screen mode — contatore utenti prominente */
+    #screen-counter {
+      display: none;
+      position: absolute; top: 20px; left: 50%;
+      transform: translateX(-50%);
+      z-index: 4;
+      background: rgba(0,0,0,.65);
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 50px;
+      padding: 10px 28px;
+      display: none;
+      flex-direction: row;
+      align-items: center;
+      gap: 20px;
+    }
+    #screen-counter .sc-item {
+      display: flex; flex-direction: column;
+      align-items: center; gap: 2px;
+    }
+    #screen-counter .sc-num {
+      font-size: 32px; font-weight: bold;
+      color: var(--gold); line-height: 1;
+    }
+    #screen-counter .sc-label {
+      font-size: 9px; letter-spacing: .2em;
+      color: var(--gray); text-transform: uppercase;
+    }
+    #screen-counter .sc-div {
+      width: 1px; height: 32px;
+      background: rgba(255,255,255,.15);
+    }
+    /* Dot animato per "live" */
+    #screen-counter .live-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #4ADE80;
+      animation: blink 2s ease-in-out infinite;
+      margin-right: -10px;
+    }
+    @keyframes blink {
+      0%,100% { opacity: 1; } 50% { opacity: .2; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── JOIN SCREEN ───────────────────────────────────────────── -->
+<div id="join">
+  <div class="brand">ODD Agency</div>
+  <h1>Illumina<br>la cattedrale</h1>
+  <p>Un video nascosto nell'oscurità. Tieni il dito sullo schermo per illuminarlo. Solo insieme riuscite a vederlo tutto.</p>
+
+  <div class="room-box">
+    <button class="btn-gold" id="btn-create">Crea stanza</button>
+    <span class="sep">oppure entra in una stanza esistente</span>
+    <div class="join-row">
+      <input id="code-input" type="text" maxlength="4"
+             placeholder="XXXX" autocomplete="off"
+             autocorrect="off" autocapitalize="characters"
+             spellcheck="false">
+      <button class="btn-outline" id="btn-join">Entra</button>
+    </div>
+    <div id="err"></div>
+  </div>
+</div>
+
+<!-- ── GAME SCREEN ───────────────────────────────────────────── -->
+<div id="game">
+  <!-- YouTube player — nascosto sotto il canvas nero -->
+  <!-- Il div viene trasformato in iframe dall'API YouTube -->
+  <div id="yt-player"></div>
+
+  <!-- Canvas overlay: nero con fori spotlight -->
+  <canvas id="cvs"></canvas>
+
+  <!-- HUD -->
+  <div id="hud">
+    <div id="hud-brand">ODD</div>
+    <div id="hud-info">
+      <span id="hud-count">0</span> online &nbsp;·&nbsp; <span id="hud-room"></span>
+    </div>
+  </div>
+
+  <!-- Istruzione scomparente -->
+  <div id="hint">Tieni il dito sullo schermo per illuminare</div>
+
+  <!-- Screen mode: contatore utenti prominente (centro in alto) -->
+  <div id="screen-counter">
+    <div class="live-dot"></div>
+    <div class="sc-item">
+      <div class="sc-num" id="sc-total">0</div>
+      <div class="sc-label">Connessi</div>
+    </div>
+    <div class="sc-div"></div>
+    <div class="sc-item">
+      <div class="sc-num" id="sc-active">0</div>
+      <div class="sc-label">Illuminano</div>
+    </div>
+  </div>
+
+  <!-- Screen mode: codice stanza + QR -->
+  <div id="screen-box">
+    <div class="qlabel">SCANNERIZZA PER PARTECIPARE</div>
+    <div id="qr-container"></div>
+    <div class="qcode" id="screen-code"></div>
+  </div>
+
+  <!-- Tap-to-start (autoplay policy browser) -->
+  <div id="tap">
+    <div class="icon">☀️</div>
+    <div class="t1">Tocca per iniziare</div>
+    <div class="t2">L'audio e il video partiranno sincronizzati con gli altri partecipanti</div>
+  </div>
+</div>
+
+<!-- YouTube IFrame API — DEVE essere caricato prima del main script -->
+<script src="https://www.youtube.com/iframe_api"></script>
+
+<!-- Firebase 9 compat (no build step, funziona da CDN) -->
+<script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-database-compat.js"></script>
+<!-- QR code (solo per screen mode) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"
+        crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<!-- Configurazione Firebase — compilare firebase-config.js -->
+<script src="./firebase-config.js"></script>
+
+<script>
+// ════════════════════════════════════════════════════════════
+//  ODD Agency — Illumina
+//  Applicativo di rivelazione video collaborativa in tempo reale
+//  Stack: HTML/CSS/JS vanilla + Firebase Realtime DB
+// ════════════════════════════════════════════════════════════
+
+// ── PARAMETRI SPOTLIGHT ──────────────────────────────────────
+// Raggio come frazione della dimensione minore dello schermo.
+// 0.18 → ~10% di area per player → 10 player = copertura totale
+const RADIUS_FRACTION   = 0.18;
+
+// Morbidezza bordo spotlight (0 = netto, 0.65 = sfumato teatro)
+const SOFTNESS_STOP     = 0.65;
+
+// Frequenza massima scritture Firebase (ms) — bilancia fluidità e costo
+const WRITE_THROTTLE_MS = 80;
+
+// Timeout inattività: spotlight scompare dopo N ms di silenzio
+const PLAYER_TIMEOUT_MS = 2500;
+
+// ── STATO ────────────────────────────────────────────────────
+let db          = null;
+let roomId      = null;
+let playerId    = null;
+let isScreen    = false;   // true = modalità schermo fisso (no player)
+let players     = {};      // snapshot Firebase aggiornato in real-time
+let pointerDown = false;
+let lastWrite   = 0;
+let hintHidden  = false;
+
+const canvas = document.getElementById('cvs');
+const ctx    = canvas.getContext('2d');
+
+// ── YOUTUBE PLAYER ───────────────────────────────────────────
+// L'API chiama window.onYouTubeIframeAPIReady quando è pronta.
+// ytReady diventa true e svuota la coda di callback.
+let ytPlayer         = null;
+let ytReady          = false;
+const ytReadyQueue   = [];
+
+function onYTReady(fn) {
+  if (ytReady) { fn(); return; }
+  ytReadyQueue.push(fn);
+}
+
+window.onYouTubeIframeAPIReady = function () {
+  ytPlayer = new YT.Player('yt-player', {
+    videoId: 'a-4kuzLgOGo',
+    playerVars: {
+      autoplay:       0,
+      controls:       0,
+      disablekb:      1,
+      fs:             0,
+      iv_load_policy: 3,
+      loop:           1,
+      playlist:       'a-4kuzLgOGo', // necessario per loop
+      modestbranding: 1,
+      playsinline:    1,
+      rel:            0,
+      mute:           1,
+    },
+    events: {
+      onReady: () => {
+        ytReady = true;
+        ytReadyQueue.forEach(fn => fn());
+        ytReadyQueue.length = 0;
+      },
+      onError: (e) => { console.warn('YT player error:', e.data); }
+    }
+  });
+};
+
+// ── UTILITÀ ──────────────────────────────────────────────────
+// Genera codice alfanumerico senza caratteri ambigui (0/O, 1/I/L)
+function genCode(len = 4) {
+  const chars = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
+  let s = '';
+  for (let i = 0; i < len; i++) s += chars[Math.floor(Math.random() * chars.length)];
+  return s;
+}
+
+function urlParam(k) {
+  return new URLSearchParams(window.location.search).get(k);
+}
+
+function showErr(msg) {
+  const el = document.getElementById('err');
+  el.textContent = msg;
+  setTimeout(() => { el.textContent = ''; }, 3000);
+}
+
+// ── FIREBASE ─────────────────────────────────────────────────
+function initFirebase() {
+  if (typeof window.FIREBASE_CONFIG === 'undefined') {
+    // Mostra guida configurazione
+    document.getElementById('join').innerHTML = `
+      <div style="max-width:340px;text-align:center;display:flex;
+                  flex-direction:column;align-items:center;gap:18px">
+        <div style="color:#D4A843;font-size:11px;letter-spacing:.3em">ODD AGENCY</div>
+        <div style="font-size:20px;font-weight:bold">Firebase non configurato</div>
+        <div style="color:#6B7280;font-size:14px;line-height:1.7">
+          Apri <code style="background:rgba(255,255,255,.1);padding:2px 8px;
+          border-radius:3px">firebase-config.js</code> e inserisci
+          le credenziali del tuo progetto Firebase.<br><br>
+          Vedi <strong>README-OPERATORE.md</strong> per le istruzioni passo passo.
+        </div>
+      </div>`;
+    return false;
+  }
+  try {
+    firebase.initializeApp(window.FIREBASE_CONFIG);
+    db = firebase.database();
+    return true;
+  } catch(e) {
+    console.error('Firebase init:', e);
+    return false;
+  }
+}
+
+// ── STANZA ───────────────────────────────────────────────────
+async function createRoom() {
+  const code = genCode(4);
+  await db.ref(`rooms/${code}`).set({
+    created: firebase.database.ServerValue.TIMESTAMP,
+    videoStart: 0  // timestamp quando parte il video (ms)
+  });
+  enterRoom(code);
+}
+
+async function joinRoom(code) {
+  code = (code || '').toUpperCase().trim();
+  if (code.length !== 4) { showErr('Codice di 4 caratteri richiesto'); return; }
+  const snap = await db.ref(`rooms/${code}/created`).once('value');
+  if (!snap.exists()) { showErr('Stanza non trovata. Controlla il codice.'); return; }
+  enterRoom(code);
+}
+
+function enterRoom(code) {
+  roomId   = code;
+  playerId = genCode(8); // ID univoco per questa sessione
+
+  // Aggiorna URL per condivisione
+  const p = new URLSearchParams(window.location.search);
+  p.set('room', code);
+  if (isScreen) p.set('mode', 'screen');
+  window.history.replaceState({}, '', '?' + p.toString());
+
+  // Mostra schermata gioco
+  document.getElementById('join').style.display = 'none';
+  document.getElementById('game').style.display = 'block';
+  document.getElementById('hud-room').textContent = code;
+
+  resizeCanvas();
+  startRenderLoop();
+
+  if (isScreen) {
+    setupScreenMode(code);
+  } else {
+    setupPlayerMode();
+  }
+
+  // Ascolta tutti i player in real-time
+  db.ref(`rooms/${roomId}/players`).on('value', snap => {
+    players = snap.val() || {};
+    const total  = Object.keys(players).length;
+    const active = Object.values(players).filter(p => p && p.active === true).length;
+
+    // HUD compatto (visibile su tutti i device)
+    document.getElementById('hud-count').textContent = total;
+
+    // Contatore prominente (solo screen mode)
+    const scTotal  = document.getElementById('sc-total');
+    const scActive = document.getElementById('sc-active');
+    if (scTotal)  scTotal.textContent  = total;
+    if (scActive) scActive.textContent = active;
+  });
+}
+
+// ── SCREEN MODE ──────────────────────────────────────────────
+// Lo schermo fisso non aggiunge un player, mostra solo QR + code
+async function setupScreenMode(code) {
+  document.getElementById('screen-box').style.display     = 'block';
+  document.getElementById('screen-counter').style.display = 'flex';
+  document.getElementById('screen-code').textContent      = code;
+
+  // QR code con URL di join
+  const url = `${location.origin}${location.pathname}?room=${code}`;
+  try {
+    new QRCode(document.getElementById('qr-container'), {
+      text: url, width: 110, height: 110,
+      colorDark: '#ffffff', colorLight: 'rgba(0,0,0,0)',
+      correctLevel: QRCode.CorrectLevel.M
+    });
+  } catch(e) { console.warn('QR non generato:', e); }
+
+  // Aspetta player pronto, sincronizza, poi avvia muto
+  await new Promise(resolve => onYTReady(resolve));
+  ytPlayer.mute();
+  await syncVideo();
+
+  // Tenta autoplay — su schermo fisso è quasi sempre permesso
+  ytPlayer.playVideo();
+
+  // Fallback: se il browser blocca autoplay, mostra tap overlay
+  setTimeout(() => {
+    try {
+      const state = ytPlayer.getPlayerState();
+      // -1 = non avviato, 2 = in pausa → autoplay bloccato
+      if (state === -1 || state === 2) {
+        document.getElementById('tap').addEventListener('click', () => {
+          ytPlayer.playVideo();
+          fadeTap();
+        }, { once: true });
+        return;
+      }
+    } catch(e) { /* ignora */ }
+    fadeTap();
+  }, 1500);
+}
+
+// ── PLAYER MODE ──────────────────────────────────────────────
+function setupPlayerMode() {
+  // Pulizia automatica alla disconnessione
+  db.ref(`rooms/${roomId}/players/${playerId}`).onDisconnect().remove();
+
+  // Touch (mobile)
+  canvas.addEventListener('touchstart',  onTS, { passive: false });
+  canvas.addEventListener('touchmove',   onTM, { passive: false });
+  canvas.addEventListener('touchend',    onTE, { passive: false });
+  canvas.addEventListener('touchcancel', onTE, { passive: false });
+
+  // Mouse (desktop)
+  canvas.addEventListener('mousedown',  onMD);
+  canvas.addEventListener('mousemove',  onMV);
+  canvas.addEventListener('mouseup',    onMU);
+  canvas.addEventListener('mouseleave', onMU);
+
+  // Tap-to-start (richiesto dai browser per autoplay con audio)
+  document.getElementById('tap').addEventListener('click', () => {
+    startAudio();
+    fadeTap();
+  }, { once: true });
+}
+
+function fadeTap() {
+  const t = document.getElementById('tap');
+  t.style.opacity = '0';
+  setTimeout(() => { t.style.display = 'none'; }, 700);
+}
+
+async function startAudio() {
+  // Assicurati che il player sia pronto
+  await new Promise(resolve => onYTReady(resolve));
+
+  // Sincronizza prima, poi avvia con audio
+  await syncVideo();
+  ytPlayer.unMute();
+  ytPlayer.setVolume(85);
+  ytPlayer.playVideo();
+
+  // Nascondi istruzione dopo 5 secondi
+  setTimeout(() => {
+    const h = document.getElementById('hint');
+    h.style.opacity = '0';
+    hintHidden = true;
+  }, 5000);
+}
+
+// ── SYNC VIDEO ───────────────────────────────────────────────
+// Usa un timestamp condiviso in Firebase per sincronizzare il punto
+// di riproduzione tra tutti i device della stessa stanza.
+// Aspetta che ytPlayer sia pronto prima di fare seekTo.
+async function syncVideo() {
+  const ref  = db.ref(`rooms/${roomId}/videoStart`);
+  const snap = await ref.once('value');
+  let   startTs = snap.val();
+
+  if (!startTs || startTs === 0) {
+    // Primo player: registra l'orario di partenza
+    startTs = Date.now();
+    await ref.set(startTs);
+  }
+
+  // Aspetta che il player YouTube sia pronto
+  await new Promise(resolve => onYTReady(resolve));
+
+  const duration = ytPlayer.getDuration();
+  if (duration > 0) {
+    const elapsed = (Date.now() - startTs) / 1000;
+    ytPlayer.seekTo(elapsed % duration, /* allowSeekAhead */ true);
+  }
+}
+
+// ── INPUT TOUCH ──────────────────────────────────────────────
+function onTS(e) {
+  e.preventDefault();
+  pointerDown = true;
+  writePos(e.touches[0].clientX, e.touches[0].clientY);
+}
+function onTM(e) {
+  e.preventDefault();
+  if (e.touches.length) writePos(e.touches[0].clientX, e.touches[0].clientY);
+}
+function onTE(e) {
+  e.preventDefault();
+  pointerDown = false;
+  deactivate();
+}
+
+// ── INPUT MOUSE ──────────────────────────────────────────────
+function onMD(e) { pointerDown = true;  writePos(e.clientX, e.clientY); }
+function onMV(e) { if (pointerDown) writePos(e.clientX, e.clientY); }
+function onMU()  { pointerDown = false; deactivate(); }
+
+// ── SCRITTURA FIREBASE ───────────────────────────────────────
+function writePos(cx, cy) {
+  const now = Date.now();
+  if (now - lastWrite < WRITE_THROTTLE_MS) return;
+  lastWrite = now;
+
+  const r  = canvas.getBoundingClientRect();
+  const nx = Math.max(0, Math.min(1, (cx - r.left) / r.width));
+  const ny = Math.max(0, Math.min(1, (cy - r.top)  / r.height));
+
+  db.ref(`rooms/${roomId}/players/${playerId}`).set({
+    x: nx, y: ny, active: true,
+    t: firebase.database.ServerValue.TIMESTAMP
+  });
+}
+
+function deactivate() {
+  db.ref(`rooms/${roomId}/players/${playerId}`).update({ active: false });
+}
+
+// ── CANVAS RESIZE ────────────────────────────────────────────
+function resizeCanvas() {
+  canvas.width  = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+window.addEventListener('resize', resizeCanvas);
+
+// ── RENDER LOOP ──────────────────────────────────────────────
+// Layer nero sopra al video con fori circolari (spotlight) nei punti
+// dove i player tengono il dito — usa destination-out per "bucare" il nero
+function renderFrame() {
+  const w   = canvas.width;
+  const h   = canvas.height;
+  const now = Date.now();
+  const r   = RADIUS_FRACTION * Math.min(w, h);
+
+  // Riempie tutto di nero (nasconde il video)
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(0, 0, w, h);
+
+  // Per ogni player attivo: ritaglia un cerchio nel nero
+  ctx.globalCompositeOperation = 'destination-out';
+
+  for (const [, p] of Object.entries(players)) {
+    if (!p || p.active === false) continue;
+    // Ignora player fermi da troppo tempo (timeout connessione)
+    if (p.t && (now - p.t) > PLAYER_TIMEOUT_MS) continue;
+
+    const px = p.x * w;
+    const py = p.y * h;
+
+    // Gradiente radiale: pieno al centro, sfuma ai bordi (effetto occhio di bue)
+    const g = ctx.createRadialGradient(px, py, 0, px, py, r);
+    g.addColorStop(0,             'rgba(0,0,0,1)');
+    g.addColorStop(SOFTNESS_STOP, 'rgba(0,0,0,0.92)');
+    g.addColorStop(1,             'rgba(0,0,0,0)');
+
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(px, py, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Ripristina compositing per il prossimo frame
+  ctx.globalCompositeOperation = 'source-over';
+
+  requestAnimationFrame(renderFrame);
+}
+
+function startRenderLoop() {
+  requestAnimationFrame(renderFrame);
+}
+
+// ── CLEANUP USCITA ───────────────────────────────────────────
+window.addEventListener('beforeunload', () => {
+  if (db && roomId && playerId) {
+    // Best-effort: rimuove il player alla chiusura
+    db.ref(`rooms/${roomId}/players/${playerId}`).remove();
+  }
+});
+
+// ── BOOTSTRAP ────────────────────────────────────────────────
+(function init() {
+  const urlRoom = urlParam('room');
+  const urlMode = urlParam('mode');
+  isScreen      = urlMode === 'screen';
+
+  if (!initFirebase()) return;
+
+  // Auto-join se l'URL contiene già il codice stanza
+  if (urlRoom && urlRoom.length === 4) {
+    enterRoom(urlRoom.toUpperCase());
+    return;
+  }
+
+  // Pulsanti join screen
+  document.getElementById('btn-create').addEventListener('click', createRoom);
+  document.getElementById('btn-join').addEventListener('click', () => {
+    joinRoom(document.getElementById('code-input').value);
+  });
+
+  const inp = document.getElementById('code-input');
+  inp.addEventListener('input',   () => { inp.value = inp.value.toUpperCase(); });
+  inp.addEventListener('keydown', e => { if (e.key === 'Enter') joinRoom(inp.value); });
+})();
+</script>
+</body>
+</html>
