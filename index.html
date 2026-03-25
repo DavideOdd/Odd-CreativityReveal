@@ -111,12 +111,13 @@
       z-index: 0; overflow: hidden;
       pointer-events: none;
       background: #000;
+      /* Recupera saturazione/contrasto del video YouTube */
+      filter: contrast(1.2) saturate(1.15);
     }
     /* L'iframe generato dall'API YT — cover esatto come object-fit:cover */
     #yt-player iframe {
       position: absolute;
       top: 50%; left: 50%;
-      /* 16:9: larghezza minima 100vw, altezza minima 100vh */
       width:  max(100%, calc(100vh * 16 / 9));
       height: max(100%, calc(100vw * 9 / 16));
       transform: translate(-50%, -50%);
@@ -322,44 +323,46 @@
 
 <script>
 // ════════════════════════════════════════════════════════════
-//  ODD Agency — Illumina
-//  Applicativo di rivelazione video collaborativa in tempo reale
-//  Stack: HTML/CSS/JS vanilla + Firebase Realtime DB
+//  ODD Agency — Illumina  v2
+//  Stack: HTML/CSS/JS vanilla + Firebase Realtime DB + YouTube IFrame API
+//  Audio spaziale: il volume sale/scende col touch (effetto surround)
 // ════════════════════════════════════════════════════════════
 
-// ── PARAMETRI SPOTLIGHT ──────────────────────────────────────
-// Raggio come frazione della dimensione minore dello schermo.
-// 0.18 → ~10% di area per player → 10 player = copertura totale
-const RADIUS_FRACTION   = 0.18;
+// ── PARAMETRI ────────────────────────────────────────────────
+const RADIUS_FRACTION    = 0.18;   // ~10% area per player (0.18 = raggio)
+const SOFTNESS_STOP      = 0.35;   // 0 = bordo netto, 1 = tutto sfumato
+const WRITE_THROTTLE_MS  = 80;     // max scritture Firebase al sec
+const PLAYER_TIMEOUT_MS  = 2500;   // spotlight scompare dopo N ms di silenzio
+const INACTIVITY_RESET_S = 10;     // sec stanza vuota → resetta sync da capo
 
-// Morbidezza bordo spotlight (0 = netto, 0.65 = sfumato teatro)
-const SOFTNESS_STOP     = 0.65;
-
-// Frequenza massima scritture Firebase (ms) — bilancia fluidità e costo
-const WRITE_THROTTLE_MS = 80;
-
-// Timeout inattività: spotlight scompare dopo N ms di silenzio
-const PLAYER_TIMEOUT_MS = 2500;
+const VOL_MAX     = 85;   // volume massimo player
+const FADE_IN_MS  = 280;  // dissolvenza entrata audio
+const FADE_OUT_MS = 360;  // dissolvenza uscita audio
 
 // ── STATO ────────────────────────────────────────────────────
-let db          = null;
-let roomId      = null;
-let playerId    = null;
-let isScreen    = false;   // true = modalità schermo fisso (no player)
-let players     = {};      // snapshot Firebase aggiornato in real-time
-let pointerDown = false;
-let lastWrite   = 0;
-let hintHidden  = false;
+let db           = null;
+let roomId       = null;
+let playerId     = null;
+let isScreen     = false;
+let players      = {};
+let pointerDown  = false;
+let lastWrite    = 0;
+let audioUnlocked = false;  // true dopo il primo gesto utente
+let volNow       = 0;
+let fadeInterval = null;
+let resetTimer   = null;    // timer inactivity reset (screen mode only)
 
 const canvas = document.getElementById('cvs');
 const ctx    = canvas.getContext('2d');
 
+// Passi di fade calcolati su intervallo 20ms
+const FADE_IN_STEP  = Math.max(1, Math.ceil(VOL_MAX / (FADE_IN_MS  / 20)));
+const FADE_OUT_STEP = Math.max(1, Math.ceil(VOL_MAX / (FADE_OUT_MS / 20)));
+
 // ── YOUTUBE PLAYER ───────────────────────────────────────────
-// L'API chiama window.onYouTubeIframeAPIReady quando è pronta.
-// ytReady diventa true e svuota la coda di callback.
-let ytPlayer         = null;
-let ytReady          = false;
-const ytReadyQueue   = [];
+let ytPlayer       = null;
+let ytReady        = false;
+const ytReadyQueue = [];
 
 function onYTReady(fn) {
   if (ytReady) { fn(); return; }
@@ -370,17 +373,17 @@ window.onYouTubeIframeAPIReady = function () {
   ytPlayer = new YT.Player('yt-player', {
     videoId: 'a-4kuzLgOGo',
     playerVars: {
-      autoplay:       0,
+      autoplay:       1,   // parte subito muto (rispetta policy browser)
       controls:       0,
       disablekb:      1,
       fs:             0,
       iv_load_policy: 3,
       loop:           1,
-      playlist:       'a-4kuzLgOGo', // necessario per loop
+      playlist:       'a-4kuzLgOGo', // necessario per loop YT
       modestbranding: 1,
       playsinline:    1,
       rel:            0,
-      mute:           1,
+      mute:           1,   // muted autoplay permesso ovunque
     },
     events: {
       onReady: () => {
@@ -388,13 +391,43 @@ window.onYouTubeIframeAPIReady = function () {
         ytReadyQueue.forEach(fn => fn());
         ytReadyQueue.length = 0;
       },
-      onError: (e) => { console.warn('YT player error:', e.data); }
+      onError: (e) => { console.warn('[YT] errore player:', e.data); }
     }
   });
 };
 
+// ── AUDIO FADE ───────────────────────────────────────────────
+// Il video gira sempre. L'audio sale/scende col dito (effetto surround).
+// audioUnlocked diventa true al primo gesto — richiesto dalle policy mobile.
+
+function audioFadeIn() {
+  if (!audioUnlocked || isScreen || !ytReady) return;
+  clearInterval(fadeInterval);
+  fadeInterval = setInterval(() => {
+    volNow = Math.min(VOL_MAX, volNow + FADE_IN_STEP);
+    ytPlayer.setVolume(volNow);
+    if (volNow >= VOL_MAX) clearInterval(fadeInterval);
+  }, 20);
+}
+
+function audioFadeOut() {
+  if (!audioUnlocked || isScreen || !ytReady) return;
+  clearInterval(fadeInterval);
+  fadeInterval = setInterval(() => {
+    volNow = Math.max(0, volNow - FADE_OUT_STEP);
+    ytPlayer.setVolume(volNow);
+    if (volNow <= 0) clearInterval(fadeInterval);
+  }, 20);
+}
+
+function unlockAudio() {
+  if (audioUnlocked || !ytReady) return;
+  ytPlayer.unMute();
+  ytPlayer.setVolume(0);  // parte da 0, poi il fade porta al max
+  audioUnlocked = true;
+}
+
 // ── UTILITÀ ──────────────────────────────────────────────────
-// Genera codice alfanumerico senza caratteri ambigui (0/O, 1/I/L)
 function genCode(len = 4) {
   const chars = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
   let s = '';
@@ -415,7 +448,6 @@ function showErr(msg) {
 // ── FIREBASE ─────────────────────────────────────────────────
 function initFirebase() {
   if (typeof window.FIREBASE_CONFIG === 'undefined') {
-    // Mostra guida configurazione
     document.getElementById('join').innerHTML = `
       <div style="max-width:340px;text-align:center;display:flex;
                   flex-direction:column;align-items:center;gap:18px">
@@ -425,7 +457,7 @@ function initFirebase() {
           Apri <code style="background:rgba(255,255,255,.1);padding:2px 8px;
           border-radius:3px">firebase-config.js</code> e inserisci
           le credenziali del tuo progetto Firebase.<br><br>
-          Vedi <strong>README-OPERATORE.md</strong> per le istruzioni passo passo.
+          Vedi <strong>README-OPERATORE.md</strong> per le istruzioni.
         </div>
       </div>`;
     return false;
@@ -444,8 +476,8 @@ function initFirebase() {
 async function createRoom() {
   const code = genCode(4);
   await db.ref(`rooms/${code}`).set({
-    created: firebase.database.ServerValue.TIMESTAMP,
-    videoStart: 0  // timestamp quando parte il video (ms)
+    created:    firebase.database.ServerValue.TIMESTAMP,
+    videoStart: 0
   });
   enterRoom(code);
 }
@@ -460,53 +492,86 @@ async function joinRoom(code) {
 
 function enterRoom(code) {
   roomId   = code;
-  playerId = genCode(8); // ID univoco per questa sessione
+  playerId = genCode(8);
 
-  // Aggiorna URL per condivisione
   const p = new URLSearchParams(window.location.search);
   p.set('room', code);
   if (isScreen) p.set('mode', 'screen');
   window.history.replaceState({}, '', '?' + p.toString());
 
-  // Mostra schermata gioco
   document.getElementById('join').style.display = 'none';
   document.getElementById('game').style.display = 'block';
   document.getElementById('hud-room').textContent = code;
 
   resizeCanvas();
   startRenderLoop();
+  startVideo();   // ← comune a tutti i mode: avvia + sincronizza
 
-  if (isScreen) {
-    setupScreenMode(code);
-  } else {
-    setupPlayerMode();
-  }
+  if (isScreen) setupScreenMode(code);
+  else          setupPlayerMode();
 
-  // Ascolta tutti i player in real-time
+  // Ascolta player in real-time
   db.ref(`rooms/${roomId}/players`).on('value', snap => {
     players = snap.val() || {};
     const total  = Object.keys(players).length;
     const active = Object.values(players).filter(p => p && p.active === true).length;
 
-    // HUD compatto (visibile su tutti i device)
     document.getElementById('hud-count').textContent = total;
-
-    // Contatore prominente (solo screen mode)
     const scTotal  = document.getElementById('sc-total');
     const scActive = document.getElementById('sc-active');
     if (scTotal)  scTotal.textContent  = total;
     if (scActive) scActive.textContent = active;
+
+    // Solo lo schermo fisso gestisce il reset per inattività
+    if (isScreen) checkInactivityReset(total);
   });
 }
 
+// ── START VIDEO (comune a tutti) ─────────────────────────────
+// Aspetta player pronto, sincronizza la posizione, avvia la riproduzione.
+// Nasconde il tap overlay non appena il video sta effettivamente girando.
+async function startVideo() {
+  await new Promise(resolve => onYTReady(resolve));
+  await syncVideo();
+  ytPlayer.playVideo(); // forza play nel caso autoplay fosse stato bloccato
+
+  // Controlla ogni 500ms: se il video gira → nascondi tap overlay
+  const autoHide = setInterval(() => {
+    if (!ytReady) return;
+    const state = ytPlayer.getPlayerState();
+    if (state === 1 || state === 3) { // 1 = PLAYING, 3 = BUFFERING
+      fadeTap();
+      clearInterval(autoHide);
+    }
+  }, 500);
+  setTimeout(() => clearInterval(autoHide), 12000); // sicurezza: smetti di controllare dopo 12s
+}
+
+// ── INACTIVITY RESET (solo screen mode) ──────────────────────
+// Se la stanza è vuota per INACTIVITY_RESET_S secondi:
+// - Scrive videoStart = 0 su Firebase
+// - Il prossimo player che entra trova 0, imposta Date.now() e tutti ripartono dall'inizio
+function checkInactivityReset(connectedCount) {
+  if (connectedCount === 0) {
+    if (!resetTimer) {
+      resetTimer = setTimeout(async () => {
+        await db.ref(`rooms/${roomId}/videoStart`).set(0);
+        console.log('[Illumina] stanza vuota → sync resettato (prossimo player riparte dall\'inizio)');
+        resetTimer = null;
+      }, INACTIVITY_RESET_S * 1000);
+    }
+  } else {
+    if (resetTimer) { clearTimeout(resetTimer); resetTimer = null; }
+  }
+}
+
 // ── SCREEN MODE ──────────────────────────────────────────────
-// Lo schermo fisso non aggiunge un player, mostra solo QR + code
-async function setupScreenMode(code) {
+// Lo schermo fisso: mostra QR + contatore, video sempre muto, nessun input.
+function setupScreenMode(code) {
   document.getElementById('screen-box').style.display     = 'block';
   document.getElementById('screen-counter').style.display = 'flex';
   document.getElementById('screen-code').textContent      = code;
 
-  // QR code con URL di join
   const url = `${location.origin}${location.pathname}?room=${code}`;
   try {
     new QRCode(document.getElementById('qr-container'), {
@@ -515,102 +580,57 @@ async function setupScreenMode(code) {
       correctLevel: QRCode.CorrectLevel.M
     });
   } catch(e) { console.warn('QR non generato:', e); }
-
-  // Aspetta player pronto, sincronizza, poi avvia muto
-  await new Promise(resolve => onYTReady(resolve));
-  ytPlayer.mute();
-  await syncVideo();
-
-  // Tenta autoplay — su schermo fisso è quasi sempre permesso
-  ytPlayer.playVideo();
-
-  // Fallback: se il browser blocca autoplay, mostra tap overlay
-  setTimeout(() => {
-    try {
-      const state = ytPlayer.getPlayerState();
-      // -1 = non avviato, 2 = in pausa → autoplay bloccato
-      if (state === -1 || state === 2) {
-        document.getElementById('tap').addEventListener('click', () => {
-          ytPlayer.playVideo();
-          fadeTap();
-        }, { once: true });
-        return;
-      }
-    } catch(e) { /* ignora */ }
-    fadeTap();
-  }, 1500);
+  // Avvio e sync gestiti da startVideo() — screen mode rimane sempre muto
 }
 
 // ── PLAYER MODE ──────────────────────────────────────────────
 function setupPlayerMode() {
-  // Pulizia automatica alla disconnessione
   db.ref(`rooms/${roomId}/players/${playerId}`).onDisconnect().remove();
 
-  // Touch (mobile)
   canvas.addEventListener('touchstart',  onTS, { passive: false });
   canvas.addEventListener('touchmove',   onTM, { passive: false });
   canvas.addEventListener('touchend',    onTE, { passive: false });
   canvas.addEventListener('touchcancel', onTE, { passive: false });
 
-  // Mouse (desktop)
   canvas.addEventListener('mousedown',  onMD);
   canvas.addEventListener('mousemove',  onMV);
   canvas.addEventListener('mouseup',    onMU);
   canvas.addEventListener('mouseleave', onMU);
 
-  // Tap-to-start (richiesto dai browser per autoplay con audio)
+  // Tap overlay: sblocca contesto audio al primo tocco (richiesto da iOS/Android)
   document.getElementById('tap').addEventListener('click', () => {
-    startAudio();
+    unlockAudio();
+    ytPlayer.playVideo(); // forza play se autoplay era bloccato
     fadeTap();
   }, { once: true });
 }
 
 function fadeTap() {
   const t = document.getElementById('tap');
+  if (!t || t.style.display === 'none') return;
   t.style.opacity = '0';
   setTimeout(() => { t.style.display = 'none'; }, 700);
 }
 
-async function startAudio() {
-  // Assicurati che il player sia pronto
-  await new Promise(resolve => onYTReady(resolve));
-
-  // Sincronizza prima, poi avvia con audio
-  await syncVideo();
-  ytPlayer.unMute();
-  ytPlayer.setVolume(85);
-  ytPlayer.playVideo();
-
-  // Nascondi istruzione dopo 5 secondi
-  setTimeout(() => {
-    const h = document.getElementById('hint');
-    h.style.opacity = '0';
-    hintHidden = true;
-  }, 5000);
-}
-
 // ── SYNC VIDEO ───────────────────────────────────────────────
-// Usa un timestamp condiviso in Firebase per sincronizzare il punto
-// di riproduzione tra tutti i device della stessa stanza.
-// Aspetta che ytPlayer sia pronto prima di fare seekTo.
+// Usa videoStart (timestamp Firebase) come clock condiviso.
+// Se è 0 (stanza appena creata o reset per inattività) → lo imposta a Date.now().
+// Tutti i device calcolano elapsed e fanno seekTo allo stesso secondo.
 async function syncVideo() {
   const ref  = db.ref(`rooms/${roomId}/videoStart`);
   const snap = await ref.once('value');
   let   startTs = snap.val();
 
   if (!startTs || startTs === 0) {
-    // Primo player: registra l'orario di partenza
     startTs = Date.now();
     await ref.set(startTs);
   }
 
-  // Aspetta che il player YouTube sia pronto
   await new Promise(resolve => onYTReady(resolve));
-
   const duration = ytPlayer.getDuration();
   if (duration > 0) {
     const elapsed = (Date.now() - startTs) / 1000;
-    ytPlayer.seekTo(elapsed % duration, /* allowSeekAhead */ true);
+    ytPlayer.seekTo(elapsed % duration, true);
   }
 }
 
@@ -618,6 +638,8 @@ async function syncVideo() {
 function onTS(e) {
   e.preventDefault();
   pointerDown = true;
+  unlockAudio();   // no-op se già sbloccato
+  audioFadeIn();
   writePos(e.touches[0].clientX, e.touches[0].clientY);
 }
 function onTM(e) {
@@ -627,13 +649,19 @@ function onTM(e) {
 function onTE(e) {
   e.preventDefault();
   pointerDown = false;
+  audioFadeOut();
   deactivate();
 }
 
 // ── INPUT MOUSE ──────────────────────────────────────────────
-function onMD(e) { pointerDown = true;  writePos(e.clientX, e.clientY); }
+function onMD(e) {
+  pointerDown = true;
+  unlockAudio();
+  audioFadeIn();
+  writePos(e.clientX, e.clientY);
+}
 function onMV(e) { if (pointerDown) writePos(e.clientX, e.clientY); }
-function onMU()  { pointerDown = false; deactivate(); }
+function onMU()  { pointerDown = false; audioFadeOut(); deactivate(); }
 
 // ── SCRITTURA FIREBASE ───────────────────────────────────────
 function writePos(cx, cy) {
@@ -663,34 +691,30 @@ function resizeCanvas() {
 window.addEventListener('resize', resizeCanvas);
 
 // ── RENDER LOOP ──────────────────────────────────────────────
-// Layer nero sopra al video con fori circolari (spotlight) nei punti
-// dove i player tengono il dito — usa destination-out per "bucare" il nero
 function renderFrame() {
   const w   = canvas.width;
   const h   = canvas.height;
   const now = Date.now();
   const r   = RADIUS_FRACTION * Math.min(w, h);
 
-  // Riempie tutto di nero (nasconde il video)
   ctx.globalCompositeOperation = 'source-over';
   ctx.fillStyle = '#000000';
   ctx.fillRect(0, 0, w, h);
 
-  // Per ogni player attivo: ritaglia un cerchio nel nero
   ctx.globalCompositeOperation = 'destination-out';
 
   for (const [, p] of Object.entries(players)) {
     if (!p || p.active === false) continue;
-    // Ignora player fermi da troppo tempo (timeout connessione)
     if (p.t && (now - p.t) > PLAYER_TIMEOUT_MS) continue;
 
     const px = p.x * w;
     const py = p.y * h;
 
-    // Gradiente radiale: pieno al centro, sfuma ai bordi (effetto occhio di bue)
+    // Gradiente: 100% trasparente fino a SOFTNESS_STOP, poi sfuma
+    // Con SOFTNESS_STOP basso (0.35) il cerchio è netto e brillante
     const g = ctx.createRadialGradient(px, py, 0, px, py, r);
     g.addColorStop(0,             'rgba(0,0,0,1)');
-    g.addColorStop(SOFTNESS_STOP, 'rgba(0,0,0,0.92)');
+    g.addColorStop(SOFTNESS_STOP, 'rgba(0,0,0,0.97)');
     g.addColorStop(1,             'rgba(0,0,0,0)');
 
     ctx.fillStyle = g;
@@ -699,9 +723,7 @@ function renderFrame() {
     ctx.fill();
   }
 
-  // Ripristina compositing per il prossimo frame
   ctx.globalCompositeOperation = 'source-over';
-
   requestAnimationFrame(renderFrame);
 }
 
@@ -709,10 +731,9 @@ function startRenderLoop() {
   requestAnimationFrame(renderFrame);
 }
 
-// ── CLEANUP USCITA ───────────────────────────────────────────
+// ── CLEANUP ──────────────────────────────────────────────────
 window.addEventListener('beforeunload', () => {
   if (db && roomId && playerId) {
-    // Best-effort: rimuove il player alla chiusura
     db.ref(`rooms/${roomId}/players/${playerId}`).remove();
   }
 });
@@ -725,13 +746,11 @@ window.addEventListener('beforeunload', () => {
 
   if (!initFirebase()) return;
 
-  // Auto-join se l'URL contiene già il codice stanza
   if (urlRoom && urlRoom.length === 4) {
     enterRoom(urlRoom.toUpperCase());
     return;
   }
 
-  // Pulsanti join screen
   document.getElementById('btn-create').addEventListener('click', createRoom);
   document.getElementById('btn-join').addEventListener('click', () => {
     joinRoom(document.getElementById('code-input').value);
